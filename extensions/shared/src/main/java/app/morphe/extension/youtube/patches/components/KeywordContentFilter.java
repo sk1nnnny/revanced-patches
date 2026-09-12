@@ -33,54 +33,25 @@ import app.morphe.extension.youtube.settings.Settings;
 import app.morphe.extension.youtube.shared.RootView;
 
 /**
- * <pre>
- * Allows hiding home feed and search results based on video title keywords and/or channel names.
- *
- * Limitations:
- * - Searching for a keyword phrase will give no search results.
- *   This is because the buffer for each video contains the text the user searched for, and everything
- *   will be filtered away (even if that video title/channel does not contain any keywords).
- * - Filtering a channel name can still show Shorts from that channel in the search results.
- *   The most common Shorts layouts do not include the channel name, so they will not be filtered.
- * - Some layout component residue will remain, such as the video chapter previews for some search results.
- *   These components do not include the video title or channel name, and they
- *   appear outside the filtered components so they are not caught.
- * - Keywords are case sensitive, but some casing variation is manually added.
- *   (ie: "mr beast" automatically filters "Mr Beast" and "MR BEAST").
- * - Keywords present in the layout or video data cannot be used as filters, otherwise all videos
- *   will always be hidden.  This patch checks for some words of these words.
- * - When using whole word syntax, some keywords may need additional pluralized variations.
+ * Filters feed and search results based on video title keywords and/or channel names.
  */
 @SuppressWarnings({"ConstantValue", "ExtractMethodRecommender", "FieldCanBeLocal",
         "RedundantIfStatement", "StringEquality", "unchecked", "unused"})
 public final class KeywordContentFilter extends Filter {
 
-    /**
-     * Composite rule syntax pattern:
-     * "word1" & "word2"  -> hide when both words appear (exact whole-word matching)
-     * "word1" !& "word2" -> hide when first word appears and second word does NOT appear
-     */
     private final Pattern COMPOSITE_RULE_PATTERN =
             Pattern.compile("^\\s*\"([^\"]+)\"\\s*(!?&|&!)\\s*\"([^\"]+)\"\\s*$");
 
-    /**
-     * Strings found in the buffer for every videos.  Full strings should be specified.
-     * <p>
-     * This list does not include every common buffer string, and this can be added/changed as needed.
-     * Words must be entered with the exact casing as found in the buffer.
-     */
     private final String[] STRINGS_IN_EVERY_BUFFER = {
-            // Video playback data.
-            "googlevideo.com/initplayback?source=youtube", // Video url.
-            "ANDROID", // Video url parameter.
-            "https://i.ytimg.com/vi/", // Thumbnail url.
+            "googlevideo.com/initplayback?source=youtube",
+            "ANDROID",
+            "https://i.ytimg.com/vi/",
             "mqdefault.jpg",
             "hqdefault.jpg",
             "sddefault.jpg",
             "hq720.jpg",
             "webp",
-            "_custom_", // Custom thumbnail set by video creator.
-            // Video decoders.
+            "_custom_",
             "OMX.ffmpeg.vp9.decoder",
             "OMX.Intel.sw_vd.vp9",
             "OMX.MTK.VIDEO.DECODER.SW.VP9",
@@ -91,14 +62,12 @@ public final class KeywordContentFilter extends Filter {
             "c2.android.av1-dav1d.decoder",
             "c2.android.vp9.decoder",
             "c2.mtk.sw.vp9.decoder",
-            // Analytics.
             "searchR",
             "browse-feed",
             "FEwhat_to_watch",
             "FEsubscriptions",
             "search_vwc_description_transition_key",
             "g-high-recZ",
-            // Text and litho components found in the buffer that belong to path filters.
             "expandable_metadata.",
             "thumbnail.",
             "avatar.",
@@ -109,11 +78,8 @@ public final class KeywordContentFilter extends Filter {
             "sans-serif"
     };
 
-    /**
-     * Substrings that are always first in the identifier.
-     */
     private final StringFilterGroup startsWithFilter = new StringFilterGroup(
-            null, // Multiple settings are used and must be individually checked if active.
+            null,
             "video_lockup_with_attachment.",
             "compact_video.",
             "inline_shorts",
@@ -121,23 +87,13 @@ public final class KeywordContentFilter extends Filter {
             "shorts_pivot_item."
     );
 
-    /**
-     * Substrings that are never at the start of the path.
-     */
     private final StringFilterGroup containsFilter = new StringFilterGroup(
             null,
             "modern_type_shelf_header_content.",
-            "shorts_lockup_cell.", // Part of 'shorts_shelf_carousel.'
-            "video_card." // Shorts that appear in a horizontal shelf.
+            "shorts_lockup_cell.",
+            "video_card."
     );
 
-    /**
-     * Path components to not filter.  Cannot filter the buffer when these are present,
-     * otherwise text in UI controls can be filtered as a keyword (such as using "Playlist" as a keyword).
-     * <p>
-     * This is also a small performance improvement since
-     * the buffer of the parent component was already searched and passed.
-     */
     private final StringTrieSearch exceptions = new StringTrieSearch(
             "metadata.",
             "thumbnail.",
@@ -145,92 +101,39 @@ public final class KeywordContentFilter extends Filter {
             "overflow_button."
     );
 
-    /**
-     * Minimum keyword/phrase length to prevent excessively broad content filtering.
-     * Only applies when not using whole word syntax.
-     */
     private final int MINIMUM_KEYWORD_LENGTH = 3;
-
-    /**
-     * Threshold for {@link #filteredVideosPercentage}
-     * that indicates all or nearly all videos have been filtered.
-     * This should be close to 100% to reduce false positives.
-     */
     private final float ALL_VIDEOS_FILTERED_THRESHOLD = 0.95f;
-
     private final float ALL_VIDEOS_FILTERED_SAMPLE_SIZE = 50;
-
-    private final long ALL_VIDEOS_FILTERED_BACKOFF_MILLISECONDS = 60 * 1000; // 60 seconds
-
+    private final long ALL_VIDEOS_FILTERED_BACKOFF_MILLISECONDS = 60 * 1000;
     private final int UTF8_MAX_BYTE_COUNT = 4;
 
-    /**
-     * Rolling average of how many videos were filtered by a keyword.
-     * Used to detect if a keyword passes the initial check against {@link #STRINGS_IN_EVERY_BUFFER}
-     * but a keyword is still hiding all videos.
-     * <p>
-     * This check can still fail if some extra UI elements pass the keywords,
-     * such as the video chapter preview or any other elements.
-     * <p>
-     * To test this, add a filter that appears in all videos (such as 'ovd='),
-     * and open the subscription feed. In practice this does not always identify problems
-     * in the home feed and search, because the home feed has a finite amount of content and
-     * search results have a lot of extra video junk that is not hidden and interferes with the detection.
-     */
     private volatile float filteredVideosPercentage;
-
-    /**
-     * If filtering is temporarily turned off, the time to resume filtering.
-     * Field is zero if no timeout is in effect.
-     */
     private volatile long timeToResumeFiltering;
-
     private final StringFilterGroup commentsFilter;
-
     private final StringTrieSearch commentsFilterExceptions = new StringTrieSearch();
 
-    /**
-     * The last value of {@link Settings#HIDE_KEYWORD_CONTENT_PHRASES}
-     * parsed and loaded into {@link #bufferSearch}.
-     * Allows changing the keywords without restarting the app.
-     */
     private volatile String lastKeywordPhrasesParsed;
-
     private volatile ByteTrieSearch bufferSearch;
 
     private void logNavigationState(String state) {
-        // Enable locally to debug filtering. Default off to reduce log spam.
         final boolean LOG_NAVIGATION_STATE = false;
         if (LOG_NAVIGATION_STATE) {
             Logger.printDebug(() -> "Navigation state: " + state);
         }
     }
 
-    /**
-     * Change first letter of the first word to use title case.
-     */
     private String titleCaseFirstWordOnly(String sentence) {
-        if (sentence.isEmpty()) {
-            return sentence;
-        }
+        if (sentence.isEmpty()) return sentence;
         final int firstCodePoint = sentence.codePointAt(0);
-        // In some non English languages title case is different than uppercase.
         return new StringBuilder()
                 .appendCodePoint(Character.toTitleCase(firstCodePoint))
                 .append(sentence, Character.charCount(firstCodePoint), sentence.length())
                 .toString();
     }
 
-    /**
-     * Uppercase the first letter of each word.
-     */
     private String capitalizeAllFirstLetters(String sentence) {
-        if (sentence.isEmpty()) {
-            return sentence;
-        }
-
+        if (sentence.isEmpty()) return sentence;
         final int delimiter = ' ';
-        // Use code points and not characters to handle unicode surrogates.
         int[] codePoints = sentence.codePoints().toArray();
         boolean capitalizeNext = true;
         for (int i = 0, length = codePoints.length; i < length; i++) {
@@ -245,17 +148,13 @@ public final class KeywordContentFilter extends Filter {
         return new String(codePoints, 0, codePoints.length);
     }
 
-    /**
-     * @return If the string contains any characters from languages that do not use spaces between words.
-     */
     private boolean isLanguageWithNoSpaces(String text) {
         for (int i = 0, length = text.length(); i < length; ) {
             final int codePoint = text.codePointAt(i);
-
             Character.UnicodeBlock block = Character.UnicodeBlock.of(codePoint);
-            if (block == CJK_UNIFIED_IDEOGRAPHS // Chinese and Kanji
-                    || block == HIRAGANA // Japanese Hiragana
-                    || block == KATAKANA // Japanese Katakana
+            if (block == CJK_UNIFIED_IDEOGRAPHS
+                    || block == HIRAGANA
+                    || block == KATAKANA
                     || block == THAI
                     || block == LAO
                     || block == MYANMAR
@@ -263,16 +162,11 @@ public final class KeywordContentFilter extends Filter {
                     || block == TIBETAN) {
                 return true;
             }
-
             i += Character.charCount(codePoint);
         }
-
         return false;
     }
 
-    /**
-     * @return If the phrase will hide all videos. Not an exhaustive check.
-     */
     private boolean phrasesWillHideAllVideos(@NonNull String[] phrases, boolean matchWholeWords) {
         for (String phrase : phrases) {
             for (String commonString : STRINGS_IN_EVERY_BUFFER) {
@@ -282,11 +176,9 @@ public final class KeywordContentFilter extends Filter {
                     while (true) {
                         matchIndex = commonString.indexOf(phrase, matchIndex);
                         if (matchIndex < 0) break;
-
-                        if (keywordMatchIsWholeWord(commonStringBytes, matchIndex, phrase.length())) {
+                        if (isMatchValid(commonStringBytes, matchIndex, phrase.length(), phrase, true)) {
                             return true;
                         }
-
                         matchIndex++;
                     }
                 } else if (Utils.containsAny(commonString, phrases)) {
@@ -294,32 +186,131 @@ public final class KeywordContentFilter extends Filter {
                 }
             }
         }
+        return false;
+    }
+
+    /**
+     * Extracts the enclosing UTF-8 text string span from the raw Protobuf buffer.
+     * Binary control characters (< 0x20) and null bytes indicate field boundaries in protobuf wire format.
+     */
+    @Nullable
+    private String getEnclosingTextSpan(byte[] buffer, int matchStart, int matchLength) {
+        int start = matchStart;
+        int minStart = Math.max(0, matchStart - 1024);
+        while (start > minStart) {
+            byte b = buffer[start - 1];
+            if (b >= 0 && b < 0x20 && b != '\t' && b != '\n' && b != '\r') {
+                break;
+            }
+            start--;
+        }
+
+        int end = matchStart + matchLength;
+        int maxLen = Math.min(buffer.length, matchStart + matchLength + 1024);
+        while (end < maxLen) {
+            byte b = buffer[end];
+            if (b >= 0 && b < 0x20 && b != '\t' && b != '\n' && b != '\r') {
+                break;
+            }
+            end++;
+        }
+
+        if (end <= start) return null;
+        try {
+            return new String(buffer, start, end - start, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Checks if the enclosing text span is a technical string (URL, codec, layout ID, font, token).
+     */
+    private boolean isIgnoredTechnicalString(String span) {
+        if (span.isEmpty()) return true;
+        String s = span.toLowerCase();
+
+        // URLs, video endpoints, domains
+        if (s.startsWith("http://") || s.startsWith("https://")
+                || s.contains("googlevideo.com") || s.contains(".ytimg.com")
+                || s.contains("initplayback") || s.contains("youtube.com/")
+                || s.contains("youtubei/v1/")) {
+            return true;
+        }
+
+        // Hardware and software video codecs
+        if (s.startsWith("omx.") || s.startsWith("c2.") || s.contains(".decoder")) {
+            return true;
+        }
+
+        // Litho internal components, tags, UI identifiers
+        if (s.startsWith("video_lockup") || s.startsWith("compact_video")
+                || s.startsWith("shorts_") || s.startsWith("modern_type_shelf")
+                || s.startsWith("expandable_metadata") || s.startsWith("thumbnail.")
+                || s.startsWith("avatar.") || s.startsWith("overflow_button.")) {
+            return true;
+        }
+
+        // Fonts
+        if (s.contains("youtubesans") || s.contains("sans-serif")) {
+            return true;
+        }
+
+        // URL query parameter tokens without spaces (e.g. key=val, a&b)
+        if ((span.contains("=") || span.contains("&") || span.contains("?")) && !span.contains(" ")) {
+            return true;
+        }
+
+        // Image files
+        if (s.endsWith(".jpg") || s.endsWith(".png") || s.endsWith(".webp")) {
+            return true;
+        }
 
         return false;
     }
 
     /**
-     * @return If the start and end indexes are not surrounded by other letters.
-     * If the indexes are surrounded by numbers/symbols/punctuation it is considered a whole word.
+     * Verifies that keyword occurs as a whole word in the text span (Unicode-aware).
      */
-    private boolean keywordMatchIsWholeWord(byte[] text, int keywordStartIndex, int keywordLength) {
-        final Integer codePointBefore = getUtf8CodePointBefore(text, keywordStartIndex);
-        if (codePointBefore != null && Character.isLetter(codePointBefore)) {
-            return false;
+    private boolean isValidWholeWord(String span, String keyword) {
+        String spanLower = span.toLowerCase();
+        String keywordLower = keyword.toLowerCase();
+        int kwLen = keywordLower.length();
+        int idx = 0;
+
+        while ((idx = spanLower.indexOf(keywordLower, idx)) != -1) {
+            int cpBefore = idx > 0 ? span.codePointBefore(idx) : -1;
+            int nextIdx = idx + kwLen;
+            int cpAfter = nextIdx < span.length() ? span.codePointAt(nextIdx) : -1;
+
+            boolean boundaryBefore = (cpBefore == -1 || (!Character.isLetterOrDigit(cpBefore) && cpBefore != '_'));
+            boolean boundaryAfter = (cpAfter == -1 || (!Character.isLetterOrDigit(cpAfter) && cpAfter != '_'));
+
+            if (boundaryBefore && boundaryAfter) {
+                return true;
+            }
+            idx++;
         }
 
-        final Integer codePointAfter = getUtf8CodePointAt(text, keywordStartIndex + keywordLength);
-        if (codePointAfter != null && Character.isLetter(codePointAfter)) {
-            return false;
-        }
-
-        return true;
+        return false;
     }
 
     /**
-     * Find the first index of the given byte pattern in the data starting from fromIndex.
-     * Returns -1 if not found.
+     * Validates whether a match in the raw buffer is a genuine user-visible content match.
      */
+    private boolean isMatchValid(byte[] buffer, int startIndex, int matchLength, String keyword, boolean isWholeWord) {
+        String span = getEnclosingTextSpan(buffer, startIndex, matchLength);
+        if (span == null || isIgnoredTechnicalString(span)) {
+            return false;
+        }
+
+        if (!isWholeWord) {
+            return span.toLowerCase().contains(keyword.toLowerCase());
+        }
+
+        return isValidWholeWord(span, keyword);
+    }
+
     private int indexOfBytes(byte[] data, byte[] pattern, int fromIndex) {
         final int dl = data.length;
         final int pl = pattern.length;
@@ -333,114 +324,28 @@ public final class KeywordContentFilter extends Filter {
         return -1;
     }
 
-    /**
-     * Returns true if the given keyword appears at least once in the text as a whole word.
-     */
     private boolean containsWholeWord(byte[] text, byte[] keyword) {
         int from = 0;
         final int kl = keyword.length;
+        String kwStr = new String(keyword, StandardCharsets.UTF_8);
         while (true) {
             int idx = indexOfBytes(text, keyword, from);
             if (idx < 0) return false;
-            if (keywordMatchIsWholeWord(text, idx, kl)) return true;
+            if (isMatchValid(text, idx, kl, kwStr, true)) return true;
             from = idx + 1;
         }
-    }
-
-    /**
-     * @return The UTF8 character point immediately before the index,
-     * or null if the bytes before the index is not a valid UTF8 character.
-     */
-    @Nullable
-    private Integer getUtf8CodePointBefore(byte[] data, int index) {
-        int characterByteCount = 0;
-        while (--index >= 0 && ++characterByteCount <= UTF8_MAX_BYTE_COUNT) {
-            if (isValidUtf8(data, index, characterByteCount)) {
-                return decodeUtf8ToCodePoint(data, index, characterByteCount);
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * @return The UTF8 character point at the index,
-     * or null if the index holds no valid UTF8 character.
-     */
-    @Nullable
-    private Integer getUtf8CodePointAt(byte[] data, int index) {
-        int characterByteCount = 0;
-        final int dataLength = data.length;
-        while (index + characterByteCount < dataLength && ++characterByteCount <= UTF8_MAX_BYTE_COUNT) {
-            if (isValidUtf8(data, index, characterByteCount)) {
-                return decodeUtf8ToCodePoint(data, index, characterByteCount);
-            }
-        }
-
-        return null;
-    }
-
-    public boolean isValidUtf8(byte[] data, int startIndex, int numberOfBytes) {
-        switch (numberOfBytes) {
-            case 1 -> { // 0xxxxxxx (ASCII)
-                return (data[startIndex] & 0x80) == 0;
-            }
-            case 2 -> { // 110xxxxx, 10xxxxxx
-                return (data[startIndex] & 0xE0) == 0xC0
-                        && (data[startIndex + 1] & 0xC0) == 0x80;
-            }
-            case 3 -> { // 1110xxxx, 10xxxxxx, 10xxxxxx
-                return (data[startIndex] & 0xF0) == 0xE0
-                        && (data[startIndex + 1] & 0xC0) == 0x80
-                        && (data[startIndex + 2] & 0xC0) == 0x80;
-            }
-            case 4 -> { // 11110xxx, 10xxxxxx, 10xxxxxx, 10xxxxxx
-                return (data[startIndex] & 0xF8) == 0xF0
-                        && (data[startIndex + 1] & 0xC0) == 0x80
-                        && (data[startIndex + 2] & 0xC0) == 0x80
-                        && (data[startIndex + 3] & 0xC0) == 0x80;
-            }
-        }
-
-        throw new IllegalArgumentException("numberOfBytes: " + numberOfBytes);
-    }
-
-    public int decodeUtf8ToCodePoint(byte[] data, int startIndex, int numberOfBytes) {
-        switch (numberOfBytes) {
-            case 1 -> {
-                return data[startIndex];
-            }
-            case 2 -> {
-                return ((data[startIndex] & 0x1F) << 6) |
-                        (data[startIndex + 1] & 0x3F);
-            }
-            case 3 -> {
-                return ((data[startIndex] & 0x0F) << 12) |
-                        ((data[startIndex + 1] & 0x3F) << 6) |
-                        (data[startIndex + 2] & 0x3F);
-            }
-            case 4 -> {
-                return ((data[startIndex] & 0x07) << 18) |
-                        ((data[startIndex + 1] & 0x3F) << 12) |
-                        ((data[startIndex + 2] & 0x3F) << 6) |
-                        (data[startIndex + 3] & 0x3F);
-            }
-        }
-        throw new IllegalArgumentException("numberOfBytes: " + numberOfBytes);
     }
 
     private boolean phraseUsesAndOperator(ByteTrieSearch search, String phrase) {
         if (!Settings.HIDE_KEYWORD_CONTENT_USE_AND_OPERATOR.get()) {
             return false;
         }
-        // Support composite rules: "word1" & "word2" and "word1" !& "word2"
-        // These rules always use exact matching (whole-word, case-sensitive) for both words.
         Matcher composite = COMPOSITE_RULE_PATTERN.matcher(phrase);
         if (!composite.matches()) {
             return false;
         }
         final String left = Objects.requireNonNull(composite.group(1));
-        final String operator = Objects.requireNonNull(composite.group(2)); // "&", "!&" or "&!"
+        final String operator = Objects.requireNonNull(composite.group(2));
         final String right = Objects.requireNonNull(composite.group(3));
 
         final byte[] leftBytes = left.getBytes(StandardCharsets.UTF_8);
@@ -450,11 +355,9 @@ public final class KeywordContentFilter extends Filter {
         if (operator.indexOf('!') < 0) { // AND
             TrieSearch.TriePatternMatchedCallback<byte[]> callback =
                     (textSearched, startIndex, matchLength, callbackParameter) -> {
-                        // Ensure the left match is a whole word.
-                        if (!keywordMatchIsWholeWord(textSearched, startIndex, matchLength)) {
+                        if (!isMatchValid(textSearched, startIndex, matchLength, left, true)) {
                             return false;
                         }
-                        // Check that the right word also appears as a whole word anywhere in the buffer.
                         if (!containsWholeWord(textSearched, rightBytes)) {
                             return false;
                         }
@@ -464,14 +367,12 @@ public final class KeywordContentFilter extends Filter {
                     };
             search.addPattern(leftBytes, callback);
             return true;
-        } else { // NOT-AND: accept both "!&" and "&!"
+        } else { // NOT-AND
             TrieSearch.TriePatternMatchedCallback<byte[]> callback =
                     (textSearched, startIndex, matchLength, callbackParameter) -> {
-                        // Ensure the left match is a whole word.
-                        if (!keywordMatchIsWholeWord(textSearched, startIndex, matchLength)) {
+                        if (!isMatchValid(textSearched, startIndex, matchLength, left, true)) {
                             return false;
                         }
-                        // Hide only when right IS NOT present as a whole word anywhere in the buffer.
                         if (containsWholeWord(textSearched, rightBytes)) {
                             return false;
                         }
@@ -492,56 +393,39 @@ public final class KeywordContentFilter extends Filter {
         return phrase.substring(1, phrase.length() - 1);
     }
 
-    private synchronized void parseKeywords() { // Must be synchronized since Litho is multi-threaded.
+    private synchronized void parseKeywords() {
         String rawKeywords = Settings.HIDE_KEYWORD_CONTENT_PHRASES.get();
 
         if (rawKeywords == lastKeywordPhrasesParsed) {
             Logger.printDebug(() -> "Using previously initialized search");
-            return; // Another thread won the race, and search is already initialized.
+            return;
         }
 
         ByteTrieSearch search = new ByteTrieSearch();
         String[] split = rawKeywords.split("\n");
         if (split.length != 0) {
-            // Linked Set so log statement are more organized and easier to read.
-            // Map is: Phrase -> isWholeWord
             Map<String, Boolean> keywords = new LinkedHashMap<>(10 * split.length);
 
             for (String phrase : split) {
-                // Remove any trailing spaces the user may have accidentally included.
-                phrase = phrase.stripTrailing();
-                if (phrase.isBlank()) continue;
+                phrase = phrase.strip();
+                if (phrase.isEmpty()) continue;
 
                 if (phraseUsesAndOperator(search, phrase)) continue;
 
                 final boolean wholeWordMatching;
                 if (phraseUsesWholeWordSyntax(phrase)) {
                     if (phrase.length() == 2) {
-                        continue; // Empty "" phrase
+                        continue; // Empty ""
                     }
                     phrase = stripWholeWordSyntax(phrase);
                     wholeWordMatching = true;
                 } else if (phrase.length() < MINIMUM_KEYWORD_LENGTH && !isLanguageWithNoSpaces(phrase)) {
-                    // Allow phrases of 1 and 2 characters if using a
-                    // language that does not use spaces between words.
-
-                    // Do not reset the setting. Keep the invalid keywords so the user can fix the mistake.
                     Utils.showToastLong(str("revanced_hide_keyword_toast_invalid_length", phrase, MINIMUM_KEYWORD_LENGTH));
                     continue;
                 } else {
                     wholeWordMatching = false;
                 }
 
-                // Common casing that might appear.
-                //
-                // This could be simplified by adding case insensitive search to the prefix search,
-                // which is very simple to add to StringTreSearch for Unicode and ByteTrieSearch for ASCII.
-                //
-                // But to support Unicode with ByteTrieSearch would require major changes because
-                // UTF-8 characters can be different byte lengths, which does
-                // not allow comparing two different byte arrays using simple plain array indexes.
-                //
-                // Instead use all common case variations of the words.
                 String[] phraseVariations = {
                         phrase,
                         phrase.toLowerCase(),
@@ -549,21 +433,16 @@ public final class KeywordContentFilter extends Filter {
                         capitalizeAllFirstLetters(phrase),
                         phrase.toUpperCase()
                 };
-                if (phrasesWillHideAllVideos(phraseVariations, wholeWordMatching)) {
-                    String toastMessage;
-                    // If whole word matching is off, but would pass with on, then show a different toast.
-                    if (!wholeWordMatching && !phrasesWillHideAllVideos(phraseVariations, true)) {
-                        toastMessage = "revanced_hide_keyword_toast_invalid_common_whole_word_required";
-                    } else {
-                        toastMessage = "revanced_hide_keyword_toast_invalid_common";
-                    }
 
+                if (phrasesWillHideAllVideos(phraseVariations, wholeWordMatching)) {
+                    String toastMessage = (!wholeWordMatching && !phrasesWillHideAllVideos(phraseVariations, true))
+                            ? "revanced_hide_keyword_toast_invalid_common_whole_word_required"
+                            : "revanced_hide_keyword_toast_invalid_common";
                     Utils.showToastLong(str(toastMessage, phrase));
                     continue;
                 }
 
                 for (String variation : phraseVariations) {
-                    // Check if the same phrase is declared both with and without quotes.
                     Boolean existing = keywords.get(variation);
                     if (existing == null) {
                         keywords.put(variation, wholeWordMatching);
@@ -579,7 +458,7 @@ public final class KeywordContentFilter extends Filter {
                 final boolean isWholeWord = entry.getValue();
                 TrieSearch.TriePatternMatchedCallback<byte[]> callback =
                         (textSearched, startIndex, matchLength, callbackParameter) -> {
-                            if (isWholeWord && !keywordMatchIsWholeWord(textSearched, startIndex, matchLength)) {
+                            if (!isMatchValid(textSearched, startIndex, matchLength, keyword, isWholeWord)) {
                                 return false;
                             }
 
@@ -598,7 +477,7 @@ public final class KeywordContentFilter extends Filter {
         bufferSearch = search;
         timeToResumeFiltering = 0;
         filteredVideosPercentage = 0;
-        lastKeywordPhrasesParsed = rawKeywords; // Must set last.
+        lastKeywordPhrasesParsed = rawKeywords;
     }
 
     public KeywordContentFilter() {
@@ -609,7 +488,6 @@ public final class KeywordContentFilter extends Filter {
                 "comment_thread."
         );
 
-        // Keywords are parsed on first call to isFiltered()
         addPathCallbacks(startsWithFilter, containsFilter, commentsFilter);
     }
 
@@ -618,7 +496,6 @@ public final class KeywordContentFilter extends Filter {
             if (System.currentTimeMillis() < timeToResumeFiltering) {
                 return false;
             }
-
             timeToResumeFiltering = 0;
             filteredVideosPercentage = 0;
             Logger.printDebug(() -> "Resuming keyword filtering");
@@ -634,26 +511,22 @@ public final class KeywordContentFilter extends Filter {
             return true;
         }
 
-        // Must check player type first, as search bar can be active behind the player.
         if (RootView.isPlayerActive()) {
-            // For now, consider the under video results the same as the home feed.
             return hideHome;
         }
 
-        // Must check second, as search can be from any tab.
         if (RootView.isSearchBarActive()) {
             return hideSearch;
         }
 
         NavigationButton selectedNavButton = NavigationButton.getSelectedNavigationButton();
         if (selectedNavButton == null) {
-            return hideHome; // Unknown tab, treat the same as home.
+            return hideHome;
         }
 
         return switch (selectedNavButton) {
             case HOME -> hideHome;
             case SUBSCRIPTIONS -> hideSubscriptions;
-            // User is in the Library or notifications.
             default -> false;
         };
     }
@@ -670,10 +543,7 @@ public final class KeywordContentFilter extends Filter {
             return;
         }
 
-        // A keyword is hiding everything.
-        // Inform the user, and temporarily turn off filtering.
         timeToResumeFiltering = System.currentTimeMillis() + ALL_VIDEOS_FILTERED_BACKOFF_MILLISECONDS;
-
         Logger.printDebug(() -> "Temporarily turning off filtering due to excessively broad filter: " + keyword);
         Utils.showToastLong(str("revanced_hide_keyword_toast_invalid_broad", keyword));
     }
@@ -685,18 +555,15 @@ public final class KeywordContentFilter extends Filter {
             return false;
         }
 
-        // Do not filter if comments path includes an engagement toolbar (like, dislike...)
         if (matchedGroup == commentsFilter && commentsFilterExceptions.matches(path)) {
             return false;
         }
 
         if (exceptions.matches(path)) {
-            return false; // Do not update statistics.
+            return false;
         }
 
-        // Field is intentionally compared using reference equality.
         if (Settings.HIDE_KEYWORD_CONTENT_PHRASES.get() != lastKeywordPhrasesParsed) {
-            // User changed the keywords or whole word setting.
             parseKeywords();
         }
 
@@ -705,7 +572,7 @@ public final class KeywordContentFilter extends Filter {
         }
 
         MutableReference<String> matchRef = new MutableReference<>();
-        if (bufferSearch.matches(buffer, matchRef)) {
+        if (bufferSearch != null && bufferSearch.matches(buffer, matchRef)) {
             updateStats(true, matchRef.value);
             return true;
         }
@@ -715,9 +582,6 @@ public final class KeywordContentFilter extends Filter {
     }
 }
 
-/**
- * Simple non-atomic wrapper since {@link AtomicReference#setPlain(Object)} is not available with Android 8.0.
- */
 final class MutableReference<T> {
     T value;
 }
