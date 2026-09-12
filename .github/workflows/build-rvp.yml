@@ -1,0 +1,29 @@
+name: Build Patches (.rvp)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Build Patches
+        run: |
+          chmod +x gradlew
+          ./gradlew build
+
+      - name: Upload RVP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: revanced-patches
+          path: patches/build/libs/*.rvp
