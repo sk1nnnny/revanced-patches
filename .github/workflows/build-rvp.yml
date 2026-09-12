@@ -3,6 +3,10 @@ name: Build Patches (.rvp)
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,9 +22,12 @@ jobs:
           java-version: '17'
 
       - name: Build Patches
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           chmod +x gradlew
-          ./gradlew build
+          ./gradlew build --stacktrace
 
       - name: Upload RVP artifact
         uses: actions/upload-artifact@v4
